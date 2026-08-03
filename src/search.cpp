@@ -1083,14 +1083,15 @@ moves_loop: // When in check, search starts from here
     singularQuietLMR = moveCountPruning = false;
     bool doubleExtension = false;
 
+    // DRAWFISH: 初始化根节点的最小绝对值边界
+    Value bestAbs = VALUE_INFINITE;
+    
     // Indicate PvNodes that will probably fail low if the node was searched
     // at a depth equal or greater than the current depth, and the result of this search was a fail low.
     bool likelyFailLow =    PvNode
                          && ttMove
                          && (tte->bound() & BOUND_UPPER)
                          && tte->depth() >= depth;
-    // DRAWFISH: 初始化根节点的最小绝对值边界
-    Value bestAbs = VALUE_INFINITE;
 
     // Step 12. Loop through all pseudo-legal moves until no moves remain
     // or a beta cutoff occurs.
