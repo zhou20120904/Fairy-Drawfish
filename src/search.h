@@ -65,9 +65,11 @@ struct RootMove {
   explicit RootMove(Move m) : pv(1, m) {}
   bool extract_ponder_from_tt(Position& pos);
   bool operator==(const Move& m) const { return pv[0] == m; }
-  bool operator<(const RootMove& m) const { // Sort in descending order
-    return m.score != score ? m.score < score
-                            : m.previousScore < previousScore;
+  bool operator<(const RootMove& m) const { 
+      // DRAWFISH: 按绝对值从小到大排序 (优先搜索最接近 0.00 的走法)
+      return std::abs(int(score)) != std::abs(int(m.score)) 
+           ? std::abs(int(score)) < std::abs(int(m.score))
+           : std::abs(int(previousScore)) < std::abs(int(m.previousScore));
   }
 
   Value score = -VALUE_INFINITE;
