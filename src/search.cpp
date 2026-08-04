@@ -423,10 +423,10 @@ void Thread::search() {
           // Reset aspiration window starting size
           if (rootDepth >= 4)
           {
-              // DRAWFISH: 禁用期望窗口，传递全窗口，由 Root 内部自行极速收缩
+              // DRAWFISH: 禁用原版期望窗口，传递无限窗口，由 Root 内部执行零点收缩
               alpha = -VALUE_INFINITE;
               beta  =  VALUE_INFINITE;
-              trend = SCORE_ZERO; // 均势棋不需要鄙视值(contempt)
+              trend = SCORE_ZERO; // 取消鄙视值
           }
 
           int failedHighCnt = 0;
@@ -440,12 +440,8 @@ void Thread::search() {
               if (Threads.stop)
                   break;
 
-              // DRAWFISH: 直接跳出循环！因为我们在寻找0.0，不需要也不允许因为越界而重新拓宽窗口搜索
-              break; 
-              
-              // ---------------------------------------------------
-              // （原来的 if (bestValue <= alpha) 等重搜逻辑保留在下面没事，
-              //   因为上面的 break 已经直接跳出了）
+              // DRAWFISH: 直接跳出循环！不需要也不允许因为越界而重新拓宽窗口搜索
+              break;
 
               // When failing high/low give some update (without cluttering
               // the UI) before a re-search.
@@ -1082,10 +1078,12 @@ moves_loop: // When in check, search starts from here
     value = bestValue;
     singularQuietLMR = moveCountPruning = false;
     bool doubleExtension = false;
-
-    // DRAWFISH: 初始化根节点的最小绝对值边界
-    Value bestAbs = VALUE_INFINITE;
     
+    // ==========================================
+    // DRAWFISH: 初始化根节点的最小绝对值边界
+    Value bestAbs = VALUE_INFINITE; 
+    // ==========================================
+
     // Indicate PvNodes that will probably fail low if the node was searched
     // at a depth equal or greater than the current depth, and the result of this search was a fail low.
     bool likelyFailLow =    PvNode
@@ -1380,14 +1378,9 @@ moves_loop: // When in check, search starts from here
       assert(value > -VALUE_INFINITE && value < VALUE_INFINITE);
 
       // Step 19. Check for a new best move
-      // Finished searching the move. If a stop occurred, the return value of
-      // the search cannot be trusted, and we return immediately without
-      // updating best move, PV and TT.
       if (Threads.stop.load(std::memory_order_relaxed))
           return VALUE_ZERO;
 
-      // === 将从这里开始，一直到 if (value > bestValue) 结束的部分，替换为以下代码 ===
-      
       // ==========================================
       // --------- DRAWFISH LOGIC START -----------
       // ==========================================
@@ -1395,14 +1388,16 @@ moves_loop: // When in check, search starts from here
       {
           RootMove& rm = *std::find(thisThread->rootMoves.begin(),
                                     thisThread->rootMoves.end(), move);
+                                    
+          // 无论是否接受，都保留真实得分，以便下一次迭代完美排序
+          rm.score = value; 
 
           // 核心：只挑选绝对值更小（更接近0）的走法
           if (moveCount == 1 || std::abs(int(value)) < bestAbs)
           {
-              bestAbs = Value(std::abs(int(value))); // 更新逼近记录
-              bestValue = value;
+              bestAbs = Value(std::abs(int(value))); // 更新零点逼近记录
+              bestValue = value;                     // 供函数最终 return 使用
               bestMove = move;
-              rm.score = value;
               rm.selDepth = thisThread->selDepth;
               rm.pv.resize(1);
 
@@ -1414,19 +1409,14 @@ moves_loop: // When in check, search starts from here
                   ++thisThread->bestMoveChanges;
 
               // 黑客魔法：光速收缩后续步的搜索窗口！
-              // 使用 [-bestAbs - 1, bestAbs + 1] 确保新分数能严格落入零点区间
+              // 下一个走法只要偏离 0.00 超过当前最优解，就会瞬间被 Alpha-Beta 剪枝抛弃
               alpha = std::max(Value(-bestAbs - 1), -VALUE_INFINITE);
               beta  = std::min(Value( bestAbs + 1),  VALUE_INFINITE);
-          }
-          else
-          {
-              // 分数不够接近 0，直接抛弃
-              rm.score = -VALUE_INFINITE; 
           }
       }
       else
       {
-          // 非根节点：保持原版 Minimax 算法，对手依然想赢，所以它会帮我们剪枝
+          // 非根节点：保持原版 Minimax 算法，对手依然想赢，所以它会帮我们狠狠剪枝
           if (value > bestValue)
           {
               bestValue = value;
@@ -1442,7 +1432,7 @@ moves_loop: // When in check, search starts from here
                       alpha = value;
                   else
                   {
-                      assert(value >= beta); // Fail high (触发Beta剪枝)
+                      assert(value >= beta); // Fail high 触发剪枝
                       break;
                   }
               }
