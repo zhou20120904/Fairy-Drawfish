@@ -423,25 +423,40 @@ void Thread::search() {
           // Reset aspiration window starting size
           if (rootDepth >= 4)
           {
-              // DRAWFISH: 禁用原版期望窗口，传递无限窗口，由 Root 内部执行零点收缩
-              alpha = -VALUE_INFINITE;
-              beta  =  VALUE_INFINITE;
-              trend = SCORE_ZERO; // 取消鄙视值
+              Value prev = rootMoves[pvIdx].previousScore;
+              delta = Value(17 * (1 + rootPos.captures_to_hand()));
+              alpha = std::max(prev - delta,-VALUE_INFINITE);
+              beta  = std::min(prev + delta, VALUE_INFINITE);
+
+              // Adjust trend based on root move's previousScore (dynamic contempt)
+              int tr = 113 * prev / (abs(prev) + 147);
+
+              trend = (us == WHITE ?  make_score(tr, tr / 2)
+                                   : -make_score(tr, tr / 2));
           }
 
+          // Start with a small aspiration window and, in the case of a fail
+          // high/low, re-search with a bigger window until we don't fail
+          // high/low anymore.
           int failedHighCnt = 0;
           while (true)
           {
               Depth adjustedDepth = std::max(1, rootDepth - failedHighCnt - searchAgainCounter);
               bestValue = Stockfish::search<Root>(rootPos, ss, alpha, beta, adjustedDepth, false);
 
+              // Bring the best move to the front. It is critical that sorting
+              // is done with a stable algorithm because all the values but the
+              // first and eventually the new best one are set to -VALUE_INFINITE
+              // and we want to keep the same order for all the moves except the
+              // new PV that goes to the front. Note that in case of MultiPV
+              // search the already searched PV lines are preserved.
               std::stable_sort(rootMoves.begin() + pvIdx, rootMoves.begin() + pvLast);
 
+              // If search has been stopped, we break immediately. Sorting is
+              // safe because RootMoves is still valid, although it refers to
+              // the previous iteration.
               if (Threads.stop)
                   break;
-
-              // DRAWFISH: 直接跳出循环！不需要也不允许因为越界而重新拓宽窗口搜索
-              break;
 
               // When failing high/low give some update (without cluttering
               // the UI) before a re-search.
@@ -1078,11 +1093,6 @@ moves_loop: // When in check, search starts from here
     value = bestValue;
     singularQuietLMR = moveCountPruning = false;
     bool doubleExtension = false;
-    
-    // ==========================================
-    // DRAWFISH: 初始化根节点的最小绝对值边界
-    Value bestAbs = VALUE_INFINITE; 
-    // ==========================================
 
     // Indicate PvNodes that will probably fail low if the node was searched
     // at a depth equal or greater than the current depth, and the result of this search was a fail low.
@@ -1090,7 +1100,9 @@ moves_loop: // When in check, search starts from here
                          && ttMove
                          && (tte->bound() & BOUND_UPPER)
                          && tte->depth() >= depth;
-
+    
+    // Drawfish: 记录当前根节点找到的最接近 0 的绝对值
+    int best_abs = VALUE_INFINITE;
     // Step 12. Loop through all pseudo-legal moves until no moves remain
     // or a beta cutoff occurs.
     while ((move = mp.next_move(moveCountPruning)) != MOVE_NONE)
@@ -1113,6 +1125,10 @@ moves_loop: // When in check, search starts from here
           continue;
 
       ss->moveCount = ++moveCount;
+
+      // Drawfish: 如果已经搜到了 0.00 分数的完美平局步，后续根节点走法无需再搜
+      if (rootNode && moveCount > 1 && best_abs <= 1)
+          continue;
 
       if (rootNode && thisThread == Threads.main() && Time.elapsed() > 3000 && is_uci_dialect(CurrentProtocol))
           sync_cout << "info depth " << depth
@@ -1333,7 +1349,10 @@ moves_loop: // When in check, search starts from here
           // to be searched deeper than the first move, unless ttMove was extended by 2.
           Depth d = std::clamp(newDepth - r, 1, newDepth + (r < -1 && moveCount <= 5 && !doubleExtension));
 
-          value = -search<NonPV>(pos, ss+1, -(alpha+1), -alpha, d, true);
+          // Drawfish: 在根节点且非第一步时，使用零点逼近窗口 [-best_abs, +best_abs]
+          Value drawAlpha = rootNode ? Value(-best_abs) : -(alpha + 1);
+          Value drawBeta  = rootNode ? Value(best_abs)  : -alpha;
+          value = -search<NonPV>(pos, ss+1, drawAlpha, drawBeta, d, true);
 
           // If the son is reduced and fails high it will be re-searched at full depth
           doFullDepthSearch = value > alpha && d < newDepth;
@@ -1348,8 +1367,9 @@ moves_loop: // When in check, search starts from here
       // Step 17. Full depth search when LMR is skipped or fails high
       if (doFullDepthSearch)
       {
-          value = -search<NonPV>(pos, ss+1, -(alpha+1), -alpha, newDepth, !cutNode);
-
+          Value drawAlpha = rootNode ? Value(-best_abs) : -(alpha + 1);
+          Value drawBeta  = rootNode ? Value(best_abs)  : -alpha;
+          value = -search<NonPV>(pos, ss+1, drawAlpha, drawBeta, newDepth, !cutNode);
           // If the move passed LMR update its stats
           if (didLMR && !captureOrPromotion)
           {
@@ -1378,69 +1398,69 @@ moves_loop: // When in check, search starts from here
       assert(value > -VALUE_INFINITE && value < VALUE_INFINITE);
 
       // Step 19. Check for a new best move
+      // Finished searching the move. If a stop occurred, the return value of
+      // the search cannot be trusted, and we return immediately without
+      // updating best move, PV and TT.
       if (Threads.stop.load(std::memory_order_relaxed))
           return VALUE_ZERO;
 
-      // ==========================================
-      // --------- DRAWFISH LOGIC START -----------
-      // ==========================================
       if (rootNode)
       {
           RootMove& rm = *std::find(thisThread->rootMoves.begin(),
                                     thisThread->rootMoves.end(), move);
-                                    
-          // 无论是否接受，都保留真实得分，以便下一次迭代完美排序
-          rm.score = value; 
 
-          // 核心：只挑选绝对值更小（更接近0）的走法
-          if (moveCount == 1 || std::abs(int(value)) < bestAbs)
+          // PV move or new best move?
+          if (moveCount == 1 || value > alpha)
           {
-              bestAbs = Value(std::abs(int(value))); // 更新零点逼近记录
-              bestValue = value;                     // 供函数最终 return 使用
-              bestMove = move;
+              rm.score = value;
               rm.selDepth = thisThread->selDepth;
               rm.pv.resize(1);
 
               assert((ss+1)->pv);
+
               for (Move* m = (ss+1)->pv; *m != MOVE_NONE; ++m)
                   rm.pv.push_back(*m);
 
+              // We record how often the best move has been changed in each
+              // iteration. This information is used for time management and LMR
               if (moveCount > 1)
                   ++thisThread->bestMoveChanges;
-
-              // 黑客魔法：光速收缩后续步的搜索窗口！
-              // 下一个走法只要偏离 0.00 超过当前最优解，就会瞬间被 Alpha-Beta 剪枝抛弃
-              alpha = std::max(Value(-bestAbs - 1), -VALUE_INFINITE);
-              beta  = std::min(Value( bestAbs + 1),  VALUE_INFINITE);
           }
+          else
+              // All other moves but the PV are set to the lowest value: this
+              // is not a problem when sorting because the sort is stable and the
+              // move position in the list is preserved - just the PV is pushed up.
+              rm.score = -VALUE_INFINITE;
       }
-      else
+
+      // Drawfish: 判断当前步是否是更好的平局步
+      bool isDrawfishBetter = rootNode ? (moveCount == 1 || (value > -best_abs && value < best_abs))
+                                       : (value > bestValue);
+
+      if (isDrawfishBetter)
       {
-          // 非根节点：保持原版 Minimax 算法，对手依然想赢，所以它会帮我们狠狠剪枝
-          if (value > bestValue)
+          bestValue = value;
+
+          // 如果在根节点，更新当前最小的绝对值
+          if (rootNode)
+              best_abs = std::abs(int(value));
+
+          if (value > alpha || rootNode)
           {
-              bestValue = value;
+              bestMove = move;
 
-              if (value > alpha)
+              if (PvNode && !rootNode) // Update pv even in fail-high case
+                  update_pv(ss->pv, move, (ss+1)->pv);
+
+              if (PvNode && value < beta && !rootNode) // Update alpha!
+                  alpha = value;
+              else if (!rootNode)
               {
-                  bestMove = move;
-
-                  if (PvNode && !rootNode) // Update pv
-                      update_pv(ss->pv, move, (ss+1)->pv);
-
-                  if (PvNode && value < beta) 
-                      alpha = value;
-                  else
-                  {
-                      assert(value >= beta); // Fail high 触发剪枝
-                      break;
-                  }
+                  assert(value >= beta); // Fail high
+                  break;
               }
           }
       }
-      // ==========================================
-      // --------- DRAWFISH LOGIC END -------------
-      // ==========================================
 
       // If the move is worse than some previously searched move, remember it to update its stats later
       if (move != bestMove)
