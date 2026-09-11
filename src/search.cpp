@@ -1400,89 +1400,74 @@ moves_loop: // When in check, search starts from here
       assert(value > -VALUE_INFINITE && value < VALUE_INFINITE);
 
       // Step 19. Check for a new best move
-      // Finished searching the move. If a stop occurred, the return value of
-      // the search cannot be trusted, and we return immediately without
-      // updating best move, PV and TT.
       if (Threads.stop.load(std::memory_order_relaxed))
           return VALUE_ZERO;
 
+      // ==========================================
+      // --------- DRAWFISH LOGIC START -----------
+      // ==========================================
       if (rootNode)
       {
           RootMove& rm = *std::find(thisThread->rootMoves.begin(),
                                     thisThread->rootMoves.end(), move);
 
-          // PV move or new best move?
-          if (moveCount == 1 || value > alpha)
+          // 核心更新：确保 value 在合法区间，且绝对值更接近 0
+          if (value > -VALUE_INFINITE && value < VALUE_INFINITE 
+              && (moveCount == 1 || std::abs(int(value)) < bestAbs))
           {
+              bestAbs = Value(std::abs(int(value)));
+              bestValue = value;
+              bestMove = move;
               rm.score = value;
               rm.selDepth = thisThread->selDepth;
               rm.pv.resize(1);
 
-              assert((ss+1)->pv);
+              // 关键防崩：只有在 search<PV> 成功执行且 pv 非空时才拷贝
+              if ((ss+1)->pv != nullptr)
+              {
+                  for (Move* m = (ss+1)->pv; *m != MOVE_NONE; ++m)
+                      rm.pv.push_back(*m);
+              }
 
-              for (Move* m = (ss+1)->pv; *m != MOVE_NONE; ++m)
-                  rm.pv.push_back(*m);
-
-              // We record how often the best move has been changed in each
-              // iteration. This information is used for time management and LMR
               if (moveCount > 1)
                   ++thisThread->bestMoveChanges;
+
+              // 零点窗口收缩
+              alpha = std::max(Value(-bestAbs - 1), -VALUE_INFINITE);
+              beta  = std::min(Value( bestAbs + 1),  VALUE_INFINITE);
           }
           else
-              // All other moves but the PV are set to the lowest value: this
-              // is not a problem when sorting because the sort is stable and the
-              // move position in the list is preserved - just the PV is pushed up.
-              rm.score = -VALUE_INFINITE;
-      }
-
-      // Drawfish: 判断当前步是否是更好的平局步
-      bool isDrawfishBetter = rootNode ? (moveCount == 1 || (value > -best_abs && value < best_abs))
-                                       : (value > bestValue);
-
-      if (isDrawfishBetter)
-      {
-          bestValue = value;
-
-          // 如果在根节点，更新当前最小的绝对值
-          if (rootNode)
-              best_abs = std::abs(int(value));
-
-          if (value > alpha || rootNode)
           {
-              bestMove = move;
+              rm.score = -VALUE_INFINITE;
+          }
+      }
+      else
+      {
+          // 非根节点保持原生逻辑
+          if (value > bestValue)
+          {
+              bestValue = value;
 
-              if (PvNode && !rootNode) // Update pv even in fail-high case
-                  update_pv(ss->pv, move, (ss+1)->pv);
-
-              if (PvNode && value < beta && !rootNode) // Update alpha!
-                  alpha = value;
-              else if (!rootNode)
+              if (value > alpha)
               {
-                  assert(value >= beta); // Fail high
-                  break;
+                  bestMove = move;
+
+                  if (PvNode && !rootNode)
+                      update_pv(ss->pv, move, (ss+1)->pv);
+
+                  if (PvNode && value < beta)
+                      alpha = value;
+                  else
+                  {
+                      assert(value >= beta);
+                      break;
+                  }
               }
           }
       }
-
-      // If the move is worse than some previously searched move, remember it to update its stats later
-      if (move != bestMove)
-      {
-          if (captureOrPromotion && captureCount < 32)
-              capturesSearched[captureCount++] = move;
-
-          else if (!captureOrPromotion && quietCount < 64)
-              quietsSearched[quietCount++] = move;
-      }
-    }
-
-    // The following condition would detect a stop only after move loop has been
-    // completed. But in this case bestValue is valid because we have fully
-    // searched our subtree, and we can anyhow save the result in TT.
-    /*
-       if (Threads.stop)
-        return VALUE_DRAW;
-    */
-
+      // ==========================================
+      // --------- DRAWFISH LOGIC END -------------
+      // ==========================================
     // Step 20. Check for mate and stalemate
     // All legal moves have been searched and if there are no legal moves, it
     // must be a mate or a stalemate. If we are in a singular extension search then
