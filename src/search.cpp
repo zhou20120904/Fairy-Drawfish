@@ -1383,7 +1383,9 @@ moves_loop: // When in check, search starts from here
       // For PV nodes only, do a full PV search on the first move or after a fail
       // high (in the latter case search only if value < beta), otherwise let the
       // parent node fail low with value <= alpha and try another move.
-      if (PvNode && (moveCount == 1 || (value > alpha && (rootNode || value < beta))))
+      // DRAWFISH: 根节点绝不能对越界（> beta）的分支进行无剪枝PV搜索！
+      // 必须严格满足处于 [alpha, beta] 区间内才进行深搜并记录PV！
+      if (PvNode && (moveCount == 1 || (value > alpha && value < beta)))
       {
           (ss+1)->pv = pv;
           (ss+1)->pv[0] = MOVE_NONE;
