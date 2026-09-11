@@ -1077,7 +1077,7 @@ moves_loop: // When in check, search starts from here
       ss->moveCount = ++moveCount;
 
       // Drawfish: 如果已经搜到了 0.00 分数的完美平局步，后续根节点走法无需再搜
-      if (rootNode && moveCount > 1 && best_abs <= 1)
+      if (rootNode && moveCount > 1 && bestAbs <= 1)
           continue;
 
       if (rootNode && thisThread == Threads.main() && Time.elapsed() > 3000 && is_uci_dialect(CurrentProtocol))
@@ -1299,9 +1299,9 @@ moves_loop: // When in check, search starts from here
           // to be searched deeper than the first move, unless ttMove was extended by 2.
           Depth d = std::clamp(newDepth - r, 1, newDepth + (r < -1 && moveCount <= 5 && !doubleExtension));
 
-          // Drawfish: 在根节点且非第一步时，使用零点逼近窗口 [-best_abs, +best_abs]
-          Value drawAlpha = rootNode ? Value(-best_abs) : -(alpha + 1);
-          Value drawBeta  = rootNode ? Value(best_abs)  : -alpha;
+          // Drawfish: 在根节点且非第一步时，使用零点逼近窗口 [-bestAbs, +bestAbs]
+          Value drawAlpha = rootNode ? Value(-bestAbs) : -(alpha + 1);
+          Value drawBeta  = rootNode ? Value(bestAbs)  : -alpha;
           value = -search<NonPV>(pos, ss+1, drawAlpha, drawBeta, d, true);
 
           // If the son is reduced and fails high it will be re-searched at full depth
@@ -1317,8 +1317,8 @@ moves_loop: // When in check, search starts from here
       // Step 17. Full depth search when LMR is skipped or fails high
       if (doFullDepthSearch)
       {
-          Value drawAlpha = rootNode ? Value(-best_abs) : -(alpha + 1);
-          Value drawBeta  = rootNode ? Value(best_abs)  : -alpha;
+          Value drawAlpha = rootNode ? Value(-bestAbs) : -(alpha + 1);
+          Value drawBeta  = rootNode ? Value(bestAbs)  : -alpha;
           value = -search<NonPV>(pos, ss+1, drawAlpha, drawBeta, newDepth, !cutNode);
           // If the move passed LMR update its stats
           if (didLMR && !captureOrPromotion)
