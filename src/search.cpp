@@ -420,74 +420,24 @@ void Thread::search() {
           // Reset UCI info selDepth for each depth and each PV line
           selDepth = 0;
 
-          // Reset aspiration window starting size
-          if (rootDepth >= 4)
-          {
-              Value prev = rootMoves[pvIdx].previousScore;
-              delta = Value(17 * (1 + rootPos.captures_to_hand()));
-              alpha = std::max(prev - delta,-VALUE_INFINITE);
-              beta  = std::min(prev + delta, VALUE_INFINITE);
+          // DRAWFISH: 禁用期望窗口，传递全窗口，由 Root 内部自行极速收缩
+          alpha = -VALUE_INFINITE;
+          beta  =  VALUE_INFINITE;
+          trend = SCORE_ZERO;
 
-              // Adjust trend based on root move's previousScore (dynamic contempt)
-              int tr = 113 * prev / (abs(prev) + 147);
-
-              trend = (us == WHITE ?  make_score(tr, tr / 2)
-                                   : -make_score(tr, tr / 2));
-          }
-
-          // Start with a small aspiration window and, in the case of a fail
-          // high/low, re-search with a bigger window until we don't fail
-          // high/low anymore.
           int failedHighCnt = 0;
           while (true)
           {
               Depth adjustedDepth = std::max(1, rootDepth - failedHighCnt - searchAgainCounter);
               bestValue = Stockfish::search<Root>(rootPos, ss, alpha, beta, adjustedDepth, false);
 
-              // Bring the best move to the front. It is critical that sorting
-              // is done with a stable algorithm because all the values but the
-              // first and eventually the new best one are set to -VALUE_INFINITE
-              // and we want to keep the same order for all the moves except the
-              // new PV that goes to the front. Note that in case of MultiPV
-              // search the already searched PV lines are preserved.
               std::stable_sort(rootMoves.begin() + pvIdx, rootMoves.begin() + pvLast);
 
-              // If search has been stopped, we break immediately. Sorting is
-              // safe because RootMoves is still valid, although it refers to
-              // the previous iteration.
               if (Threads.stop)
                   break;
 
-              // When failing high/low give some update (without cluttering
-              // the UI) before a re-search.
-              if (   mainThread
-                  && multiPV == 1
-                  && (bestValue <= alpha || bestValue >= beta)
-                  && Time.elapsed() > 3000)
-                  sync_cout << UCI::pv(rootPos, rootDepth, alpha, beta) << sync_endl;
-
-              // In case of failing low/high increase aspiration window and
-              // re-search, otherwise exit the loop.
-              if (bestValue <= alpha)
-              {
-                  beta = (alpha + beta) / 2;
-                  alpha = std::max(bestValue - delta, -VALUE_INFINITE);
-
-                  failedHighCnt = 0;
-                  if (mainThread)
-                      mainThread->stopOnPonderhit = false;
-              }
-              else if (bestValue >= beta)
-              {
-                  beta = std::min(bestValue + delta, VALUE_INFINITE);
-                  ++failedHighCnt;
-              }
-              else
-                  break;
-
-              delta += delta / 4 + 5;
-
-              assert(alpha >= -VALUE_INFINITE && beta <= VALUE_INFINITE);
+              // DRAWFISH: 直接跳出循环，绝不再拓宽窗口重搜
+              break;
           }
 
           // Sort the PV lines searched so far and update the GUI
@@ -1102,7 +1052,7 @@ moves_loop: // When in check, search starts from here
                          && tte->depth() >= depth;
     
     // Drawfish: 记录当前根节点找到的最接近 0 的绝对值
-    int best_abs = VALUE_INFINITE;
+    Value bestAbs = VALUE_INFINITE;
     // Step 12. Loop through all pseudo-legal moves until no moves remain
     // or a beta cutoff occurs.
     while ((move = mp.next_move(moveCountPruning)) != MOVE_NONE)
@@ -1403,16 +1353,12 @@ moves_loop: // When in check, search starts from here
       if (Threads.stop.load(std::memory_order_relaxed))
           return VALUE_ZERO;
 
-      // ==========================================
-      // --------- DRAWFISH LOGIC START -----------
-      // ==========================================
       if (rootNode)
       {
           RootMove& rm = *std::find(thisThread->rootMoves.begin(),
                                     thisThread->rootMoves.end(), move);
 
-          // 核心更新：确保 value 在合法区间，且绝对值更接近 0
-          if (value > -VALUE_INFINITE && value < VALUE_INFINITE 
+          if (value > -VALUE_INFINITE && value < VALUE_INFINITE
               && (moveCount == 1 || std::abs(int(value)) < bestAbs))
           {
               bestAbs = Value(std::abs(int(value)));
@@ -1422,7 +1368,6 @@ moves_loop: // When in check, search starts from here
               rm.selDepth = thisThread->selDepth;
               rm.pv.resize(1);
 
-              // 关键防崩：只有在 search<PV> 成功执行且 pv 非空时才拷贝
               if ((ss+1)->pv != nullptr)
               {
                   for (Move* m = (ss+1)->pv; *m != MOVE_NONE; ++m)
@@ -1432,7 +1377,6 @@ moves_loop: // When in check, search starts from here
               if (moveCount > 1)
                   ++thisThread->bestMoveChanges;
 
-              // 零点窗口收缩
               alpha = std::max(Value(-bestAbs - 1), -VALUE_INFINITE);
               beta  = std::min(Value( bestAbs + 1),  VALUE_INFINITE);
           }
@@ -1443,7 +1387,6 @@ moves_loop: // When in check, search starts from here
       }
       else
       {
-          // 非根节点保持原生逻辑
           if (value > bestValue)
           {
               bestValue = value;
@@ -1465,9 +1408,17 @@ moves_loop: // When in check, search starts from here
               }
           }
       }
-      // ==========================================
-      // --------- DRAWFISH LOGIC END -------------
-      // ==========================================
+
+      // If the move is worse than some previously searched move, remember it to update its stats later
+      if (move != bestMove)
+      {
+          if (captureOrPromotion && captureCount < 32)
+              capturesSearched[captureCount++] = move;
+
+          else if (!captureOrPromotion && quietCount < 64)
+              quietsSearched[quietCount++] = move;
+      }
+    }
     // Step 20. Check for mate and stalemate
     // All legal moves have been searched and if there are no legal moves, it
     // must be a mate or a stalemate. If we are in a singular extension search then
